@@ -28,10 +28,6 @@ const User = sequelize.define(
       type: DataTypes.STRING(255),
       allowNull: false,
     },
-    phone: {
-      type: DataTypes.STRING(40),
-      allowNull: true,
-    },
     is_active: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

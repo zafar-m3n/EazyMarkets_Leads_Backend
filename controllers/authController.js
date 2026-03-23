@@ -37,7 +37,7 @@ const sanitizeUser = (user) => {
 
 const register = async (req, res) => {
   try {
-    const { full_name, email, password, role_id, phone } = req.body;
+    const { full_name, email, password, role_id } = req.body;
 
     if (!full_name || !email || !password || !role_id) {
       return resError(res, "Missing required fields", 400);
@@ -53,7 +53,6 @@ const register = async (req, res) => {
       email,
       password_hash,
       role_id,
-      phone: phone || null,
     });
 
     return resSuccess(res, { message: "User registered successfully. Please log in." }, 201);

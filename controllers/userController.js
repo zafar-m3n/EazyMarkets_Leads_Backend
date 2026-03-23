@@ -12,7 +12,7 @@ const sanitizeUser = (user) => {
 
 const createUser = async (req, res) => {
   try {
-    const { full_name, email, password, role_id, phone } = req.body;
+    const { full_name, email, password, role_id } = req.body;
 
     if (!full_name || !email || !password || !role_id) {
       return resError(res, "Missing required fields", 400);
@@ -31,7 +31,6 @@ const createUser = async (req, res) => {
       email,
       password_hash,
       role_id,
-      phone: phone || null,
       is_active: true,
     });
 
@@ -103,14 +102,13 @@ const getUserById = async (req, res) => {
 const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { full_name, email, phone, role_id, is_active } = req.body;
+    const { full_name, email, role_id, is_active } = req.body;
 
     const user = await User.findByPk(id);
     if (!user) return resError(res, "User not found", 404);
 
     if (full_name !== undefined) user.full_name = full_name;
     if (email !== undefined) user.email = email;
-    if (phone !== undefined) user.phone = phone;
     if (role_id !== undefined) user.role_id = role_id;
     if (is_active !== undefined) user.is_active = is_active;
 
