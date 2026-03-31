@@ -102,7 +102,7 @@ const getUserById = async (req, res) => {
 const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { full_name, email, role_id, is_active } = req.body;
+    const { full_name, email, role_id, is_active, password } = req.body;
 
     const user = await User.findByPk(id);
     if (!user) return resError(res, "User not found", 404);
@@ -111,6 +111,10 @@ const updateUser = async (req, res) => {
     if (email !== undefined) user.email = email;
     if (role_id !== undefined) user.role_id = role_id;
     if (is_active !== undefined) user.is_active = is_active;
+
+    if (password !== undefined && String(password).trim() !== "") {
+      user.password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    }
 
     await user.save();
 
