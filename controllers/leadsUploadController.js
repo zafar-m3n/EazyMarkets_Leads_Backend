@@ -149,7 +149,6 @@ const importLeads = async (req, res) => {
         phone: phoneRaw,
         _phoneNorm: phoneNorm,
         country: sanitizeStr(r.country) || null,
-        language: sanitizeStr(r.language) || null,
         status_id: st ? st.id : null,
         source_id: src ? src.id : null,
         _noteBody: noteBody,
@@ -275,18 +274,7 @@ const importLeads = async (req, res) => {
 const getTemplateSchema = async (req, res) => {
   try {
     return res.json({
-      fields: [
-        "first_name",
-        "last_name",
-        "company",
-        "email",
-        "phone",
-        "country",
-        "language",
-        "status",
-        "source",
-        "notes",
-      ],
+      fields: ["first_name", "last_name", "company", "email", "phone", "country", "status", "source", "notes"],
       defaults: {
         status: "New",
         source: "Choose Fallback Source",
