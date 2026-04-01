@@ -58,7 +58,12 @@ const getUsers = async (req, res) => {
     const offset = (page - 1) * limit;
 
     const { rows, count } = await User.findAndCountAll({
-      where: { is_active: true, id: { [User.sequelize.Op.ne]: 1 } },
+      where: {
+        is_active: true,
+        id: {
+          [require("sequelize").Op.ne]: 1,
+        },
+      },
       include: [{ model: Role, attributes: ["id", "value", "label"] }],
       order: [["id", "ASC"]],
       offset,
