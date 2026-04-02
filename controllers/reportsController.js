@@ -7,7 +7,6 @@ const {
   LeadAssignment,
   User,
   Role,
-  Team,
   TeamMember,
   TeamManager,
 } = require("../models");
@@ -16,44 +15,178 @@ const { resSuccess, resError } = require("../utils/responseUtil");
 // Subquery: latest assignment row id per lead
 const LATEST_ASSIGNMENT_IDS = literal(`(SELECT MAX(id) FROM lead_assignments GROUP BY lead_id)`);
 
+const FIRST_YEAR = 2025;
+const LAST_YEAR = 2035;
+const REPORT_TYPES = {
+  MONTHLY: "monthly",
+  DAILY: "daily",
+  CUSTOM_RANGE: "custom_range",
+};
+
 // =============================
 // Helpers
 // =============================
 
-/**
- * Parse the requested month/year from query string.
- * Accepted format:
- *   ?year=2026&month=3
- * If missing, defaults to *current* month (UTC).
- *
- * Restricts year to [2025, 2035] and month to [1..12].
- */
-function parseMonthRange(req) {
-  let year = parseInt(req.query.year, 10);
-  let month = parseInt(req.query.month, 10); // 1..12
+const monthNames = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
 
-  const now = new Date();
+const isValidDateObject = (value) => value instanceof Date && !Number.isNaN(value.getTime());
 
-  if (!year || Number.isNaN(year)) {
-    year = now.getUTCFullYear();
-  }
-  if (!month || Number.isNaN(month)) {
-    month = now.getUTCMonth() + 1;
+const toUtcDateStart = (dateStr) => {
+  if (!dateStr || typeof dateStr !== "string") return null;
+
+  const parts = dateStr.split("-");
+  if (parts.length !== 3) return null;
+
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
+
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day) ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31
+  ) {
+    return null;
   }
 
-  if (year < 2025 || year > 2035) {
-    throw new Error("Year must be between 2025 and 2035");
+  const date = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+
+  if (
+    !isValidDateObject(date) ||
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() + 1 !== month ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
   }
-  if (month < 1 || month > 12) {
+
+  return date;
+};
+
+const toUtcDateEnd = (dateStr) => {
+  const start = toUtcDateStart(dateStr);
+  if (!start) return null;
+
+  return new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate(), 23, 59, 59, 999));
+};
+
+const toYMD = (date) => {
+  if (!isValidDateObject(date)) return null;
+  return date.toISOString().slice(0, 10);
+};
+
+const buildMonthlyRange = (year, month) => {
+  if (!Number.isInteger(year) || year < FIRST_YEAR || year > LAST_YEAR) {
+    throw new Error(`Year must be between ${FIRST_YEAR} and ${LAST_YEAR}`);
+  }
+
+  if (!Number.isInteger(month) || month < 1 || month > 12) {
     throw new Error("Month must be between 1 and 12");
   }
 
-  // Start of month (UTC)
   const start = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
-  // End of month (UTC) – day 0 of next month gives the last day of this month
   const end = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
 
-  return { year, month, start, end };
+  return {
+    report_type: REPORT_TYPES.MONTHLY,
+    year,
+    month,
+    date: null,
+    from_date: toYMD(start),
+    to_date: toYMD(end),
+    start,
+    end,
+    label: `${monthNames[month - 1]} ${year}`,
+  };
+};
+
+const buildDailyRange = (dateStr) => {
+  const start = toUtcDateStart(dateStr);
+  const end = toUtcDateEnd(dateStr);
+
+  if (!start || !end) {
+    throw new Error("A valid date is required for daily reports");
+  }
+
+  return {
+    report_type: REPORT_TYPES.DAILY,
+    year: null,
+    month: null,
+    date: toYMD(start),
+    from_date: toYMD(start),
+    to_date: toYMD(start),
+    start,
+    end,
+    label: toYMD(start),
+  };
+};
+
+const buildCustomRange = (fromDateStr, toDateStr) => {
+  const start = toUtcDateStart(fromDateStr);
+  const end = toUtcDateEnd(toDateStr);
+
+  if (!start || !end) {
+    throw new Error("Valid from_date and to_date are required for custom range reports");
+  }
+
+  if (start > end) {
+    throw new Error("from_date cannot be after to_date");
+  }
+
+  return {
+    report_type: REPORT_TYPES.CUSTOM_RANGE,
+    year: null,
+    month: null,
+    date: null,
+    from_date: toYMD(start),
+    to_date: toYMD(end),
+    start,
+    end,
+    label: `${toYMD(start)} to ${toYMD(end)}`,
+  };
+};
+
+function parseReportPeriod(req) {
+  const reportType = String(req.query.report_type || "")
+    .trim()
+    .toLowerCase();
+
+  if (!reportType) {
+    throw new Error("report_type is required");
+  }
+
+  if (reportType === REPORT_TYPES.MONTHLY) {
+    const year = parseInt(req.query.year, 10);
+    const month = parseInt(req.query.month, 10);
+    return buildMonthlyRange(year, month);
+  }
+
+  if (reportType === REPORT_TYPES.DAILY) {
+    return buildDailyRange(req.query.date);
+  }
+
+  if (reportType === REPORT_TYPES.CUSTOM_RANGE) {
+    return buildCustomRange(req.query.from_date, req.query.to_date);
+  }
+
+  throw new Error("report_type must be one of: monthly, daily, custom_range");
 }
 
 /**
@@ -70,7 +203,7 @@ const resolveManagerAssignees = async (managerId) => {
     raw: true,
   });
 
-  const teamIds = tmRows.map((r) => r.team_id);
+  const teamIds = tmRows.map((row) => row.team_id);
   if (!teamIds.length) return [managerId];
 
   const memberRows = await TeamMember.findAll({
@@ -79,63 +212,531 @@ const resolveManagerAssignees = async (managerId) => {
     raw: true,
   });
 
-  const memberIds = memberRows.map((r) => r.user_id);
+  const memberIds = memberRows.map((row) => row.user_id);
 
   return Array.from(new Set([managerId, ...memberIds]));
 };
 
+const resolveScope = async ({ userId, role }) => {
+  if (role === "admin") {
+    return {
+      scopeType: "all",
+      scopedUserIds: null,
+    };
+  }
+
+  if (role === "manager") {
+    const scopedUserIds = await resolveManagerAssignees(userId);
+
+    return {
+      scopeType: "team",
+      scopedUserIds,
+    };
+  }
+
+  if (role === "sales_rep") {
+    return {
+      scopeType: "self",
+      scopedUserIds: [userId],
+    };
+  }
+
+  throw new Error("Forbidden for this role");
+};
+
+const getAccessibleAgents = async ({ scopeType, scopedUserIds, userId }) => {
+  const agentWhere = { is_active: true };
+
+  if (scopeType === "self") {
+    agentWhere.id = userId;
+  } else if (scopeType === "team" && Array.isArray(scopedUserIds) && scopedUserIds.length) {
+    agentWhere.id = { [Op.in]: scopedUserIds };
+  }
+
+  const agentUsers = await User.findAll({
+    where: agentWhere,
+    include: [
+      {
+        model: Role,
+        attributes: [],
+        where: { value: "sales_rep" },
+      },
+    ],
+    attributes: ["id", "full_name", "email"],
+    order: [["full_name", "ASC"]],
+  });
+
+  return agentUsers;
+};
+
+const resolveSelectedAgentIds = ({ req, accessibleAgents, role, userId }) => {
+  const rawAgentId = req.query.agent_id;
+
+  if (
+    rawAgentId === undefined ||
+    rawAgentId === null ||
+    rawAgentId === "" ||
+    String(rawAgentId).toLowerCase() === "all"
+  ) {
+    return accessibleAgents.map((agent) => agent.id);
+  }
+
+  const agentId = Number(rawAgentId);
+  if (!Number.isInteger(agentId) || agentId <= 0) {
+    throw new Error("agent_id must be a valid integer or 'all'");
+  }
+
+  const isAccessible = accessibleAgents.some((agent) => agent.id === agentId);
+
+  if (!isAccessible) {
+    if (role === "sales_rep" && agentId !== userId) {
+      throw new Error("You can only view your own reports");
+    }
+    throw new Error("Selected agent is outside your allowed scope");
+  }
+
+  return [agentId];
+};
+
+const buildNotesWhere = ({ start, end, agentIds, scopeType }) => {
+  const notesWhere = {
+    created_at: {
+      [Op.gte]: start,
+      [Op.lte]: end,
+    },
+  };
+
+  if (Array.isArray(agentIds) && agentIds.length) {
+    notesWhere.author_id = { [Op.in]: agentIds };
+  } else if (scopeType !== "all") {
+    notesWhere.author_id = { [Op.in]: [-1] };
+  }
+
+  return notesWhere;
+};
+
+const buildCallStatistics = async ({ agentUsers, notesWhere }) => {
+  let callStatistics = {
+    totalCalls: 0,
+    byAgent: [],
+  };
+
+  let callCountsMap = new Map();
+
+  if (!agentUsers.length) {
+    return { callStatistics, callCountsMap };
+  }
+
+  const callStatsRows = await LeadNote.findAll({
+    where: notesWhere,
+    attributes: ["author_id", [fn("COUNT", col("LeadNote.id")), "call_count"]],
+    group: ["author_id"],
+    raw: true,
+  });
+
+  callCountsMap = new Map(callStatsRows.map((row) => [Number(row.author_id), Number(row.call_count || 0)]));
+
+  const byAgent = agentUsers.map((user) => {
+    const callCount = callCountsMap.get(user.id) || 0;
+
+    return {
+      user_id: user.id,
+      full_name: user.full_name,
+      email: user.email,
+      call_count: callCount,
+    };
+  });
+
+  const totalCalls = byAgent.reduce((sum, item) => sum + item.call_count, 0);
+
+  callStatistics = {
+    totalCalls,
+    byAgent: byAgent.sort((a, b) => b.call_count - a.call_count || a.full_name.localeCompare(b.full_name)),
+  };
+
+  return { callStatistics, callCountsMap };
+};
+
+const buildCallsBySource = async ({ agentUsers, notesWhere, start, end }) => {
+  if (!agentUsers.length) return [];
+
+  const callsBySourceRows = await LeadNote.findAll({
+    where: notesWhere,
+    attributes: [
+      [col("Lead.source_id"), "source_id"],
+      [fn("COUNT", col("LeadNote.id")), "call_count"],
+    ],
+    include: [
+      {
+        model: Lead,
+        attributes: [],
+        where: {
+          updated_at: {
+            [Op.gte]: start,
+            [Op.lte]: end,
+          },
+        },
+        include: [
+          {
+            model: LeadSource,
+            attributes: ["id", "label", "value"],
+          },
+        ],
+      },
+    ],
+    group: ["Lead.source_id", "Lead->LeadSource.id", "Lead->LeadSource.label", "Lead->LeadSource.value"],
+    raw: true,
+  });
+
+  return callsBySourceRows.map((row) => ({
+    source_id: row.source_id,
+    label: row["Lead.LeadSource.label"] || null,
+    value: row["Lead.LeadSource.value"] || null,
+    call_count: Number(row.call_count || 0),
+  }));
+};
+
+const buildSalesFromCalls = async ({
+  customerStatus,
+  start,
+  end,
+  notesWhere,
+  scopeType,
+  scopedUserIds,
+  userId,
+  selectedAgentIds,
+}) => {
+  const salesFromCalls = {
+    totalCustomers: 0,
+    bySource: [],
+  };
+
+  const conversionsMap = new Map();
+
+  if (!customerStatus || !selectedAgentIds.length) {
+    return { salesFromCalls, conversionsMap };
+  }
+
+  const leadsWithCallsRows = await LeadNote.findAll({
+    where: notesWhere,
+    attributes: [[fn("DISTINCT", col("lead_id")), "lead_id"]],
+    raw: true,
+  });
+
+  const leadIdsWithCallsInPeriod = new Set(
+    leadsWithCallsRows.map((row) => Number(row.lead_id)).filter((id) => !Number.isNaN(id)),
+  );
+
+  if (!leadIdsWithCallsInPeriod.size) {
+    return { salesFromCalls, conversionsMap };
+  }
+
+  const salesWhere = {
+    status_id: customerStatus.id,
+    updated_at: {
+      [Op.gte]: start,
+      [Op.lte]: end,
+    },
+  };
+
+  const assignmentWhere = {
+    id: { [Op.in]: LATEST_ASSIGNMENT_IDS },
+  };
+
+  if (scopeType === "team" && Array.isArray(scopedUserIds) && scopedUserIds.length) {
+    assignmentWhere.assignee_id = { [Op.in]: scopedUserIds };
+  } else if (scopeType === "self") {
+    assignmentWhere.assignee_id = userId;
+  }
+
+  const customerLeadsRaw = await Lead.findAll({
+    where: salesWhere,
+    attributes: ["id", "source_id"],
+    include: [
+      {
+        model: LeadSource,
+        attributes: ["id", "label", "value"],
+      },
+      {
+        model: LeadAssignment,
+        as: "LeadAssignments",
+        attributes: ["assignee_id"],
+        required: true,
+        where: assignmentWhere,
+      },
+    ],
+  });
+
+  const allowedSelectedAgentIds = new Set(selectedAgentIds);
+
+  const customerLeads = customerLeadsRaw.filter((lead) => {
+    if (!leadIdsWithCallsInPeriod.has(Number(lead.id))) return false;
+
+    const latestAssignment = Array.isArray(lead.LeadAssignments) ? lead.LeadAssignments[0] : null;
+    const assigneeId = latestAssignment ? Number(latestAssignment.assignee_id) : null;
+
+    return assigneeId && allowedSelectedAgentIds.has(assigneeId);
+  });
+
+  const bySourceMap = new Map();
+
+  for (const lead of customerLeads) {
+    const sourceId = lead.source_id || 0;
+    const mapKey = String(sourceId);
+
+    const current = bySourceMap.get(mapKey) || {
+      source_id: sourceId,
+      label: lead.LeadSource ? lead.LeadSource.label : null,
+      value: lead.LeadSource ? lead.LeadSource.value : null,
+      count: 0,
+    };
+
+    current.count += 1;
+    bySourceMap.set(mapKey, current);
+
+    const latestAssignment = Array.isArray(lead.LeadAssignments) ? lead.LeadAssignments[0] : null;
+    const assigneeId = latestAssignment ? Number(latestAssignment.assignee_id) : null;
+
+    if (assigneeId && allowedSelectedAgentIds.has(assigneeId)) {
+      const previous = conversionsMap.get(assigneeId) || 0;
+      conversionsMap.set(assigneeId, previous + 1);
+    }
+  }
+
+  return {
+    salesFromCalls: {
+      totalCustomers: customerLeads.length,
+      bySource: Array.from(bySourceMap.values()).sort((a, b) => b.count - a.count),
+    },
+    conversionsMap,
+  };
+};
+
+const buildAgentPerformance = async ({
+  agentUsers,
+  allStatuses,
+  allSources,
+  start,
+  end,
+  callCountsMap,
+  conversionsMap,
+}) => {
+  let agentPerformance = {
+    statuses: allStatuses.map((status) => ({
+      id: status.id,
+      value: status.value,
+      label: status.label,
+    })),
+    sources: allSources.map((source) => ({
+      id: source.id,
+      value: source.value,
+      label: source.label,
+    })),
+    agents: [],
+  };
+
+  const agentIds = agentUsers.map((user) => user.id);
+
+  if (!agentIds.length) {
+    return agentPerformance;
+  }
+
+  const statusRows = await LeadAssignment.findAll({
+    attributes: [
+      "assignee_id",
+      [col("Lead.status_id"), "status_id"],
+      [fn("COUNT", col("LeadAssignment.lead_id")), "lead_count"],
+    ],
+    where: {
+      id: { [Op.in]: LATEST_ASSIGNMENT_IDS },
+      assignee_id: { [Op.in]: agentIds },
+      assigned_at: {
+        [Op.gte]: start,
+        [Op.lte]: end,
+      },
+    },
+    include: [
+      {
+        model: Lead,
+        attributes: [],
+      },
+    ],
+    group: ["assignee_id", "Lead.status_id"],
+    raw: true,
+  });
+
+  const statusCountsByAgent = new Map();
+  for (const row of statusRows) {
+    const assigneeId = String(row.assignee_id);
+    const statusId = String(row.status_id || 0);
+    const count = Number(row.lead_count || 0);
+
+    if (!statusCountsByAgent.has(assigneeId)) {
+      statusCountsByAgent.set(assigneeId, new Map());
+    }
+
+    const innerMap = statusCountsByAgent.get(assigneeId);
+    innerMap.set(statusId, (innerMap.get(statusId) || 0) + count);
+  }
+
+  const sourceRows = await LeadAssignment.findAll({
+    attributes: [
+      "assignee_id",
+      [col("Lead.source_id"), "source_id"],
+      [fn("COUNT", col("LeadAssignment.lead_id")), "lead_count"],
+    ],
+    where: {
+      id: { [Op.in]: LATEST_ASSIGNMENT_IDS },
+      assignee_id: { [Op.in]: agentIds },
+      assigned_at: {
+        [Op.gte]: start,
+        [Op.lte]: end,
+      },
+    },
+    include: [
+      {
+        model: Lead,
+        attributes: [],
+      },
+    ],
+    group: ["assignee_id", "Lead.source_id"],
+    raw: true,
+  });
+
+  const sourceCountsByAgent = new Map();
+  for (const row of sourceRows) {
+    const assigneeId = String(row.assignee_id);
+    const sourceId = String(row.source_id || 0);
+    const count = Number(row.lead_count || 0);
+
+    if (!sourceCountsByAgent.has(assigneeId)) {
+      sourceCountsByAgent.set(assigneeId, new Map());
+    }
+
+    const innerMap = sourceCountsByAgent.get(assigneeId);
+    innerMap.set(sourceId, (innerMap.get(sourceId) || 0) + count);
+  }
+
+  const agents = agentUsers.map((user) => {
+    const agentId = user.id;
+    const statusMap = statusCountsByAgent.get(String(agentId)) || new Map();
+    const sourceMap = sourceCountsByAgent.get(String(agentId)) || new Map();
+
+    const statusCounts = allStatuses.map((status) => ({
+      status_id: status.id,
+      status_value: status.value,
+      status_label: status.label,
+      count: statusMap.get(String(status.id)) || 0,
+    }));
+
+    const sourceCounts = allSources.map((source) => ({
+      source_id: source.id,
+      source_value: source.value,
+      source_label: source.label,
+      count: sourceMap.get(String(source.id)) || 0,
+    }));
+
+    const callsThisPeriod = callCountsMap.get(agentId) || 0;
+    const conversionsThisPeriod = conversionsMap.get(agentId) || 0;
+    const conversionRate = callsThisPeriod > 0 ? conversionsThisPeriod / callsThisPeriod : 0;
+
+    return {
+      user_id: agentId,
+      full_name: user.full_name,
+      email: user.email,
+      calls_this_period: callsThisPeriod,
+      calls_this_month: callsThisPeriod, // kept for backward compatibility
+      conversions_this_period: conversionsThisPeriod,
+      conversion_rate: conversionRate,
+      status_counts: statusCounts,
+      source_counts: sourceCounts,
+    };
+  });
+
+  agentPerformance = {
+    statuses: agentPerformance.statuses,
+    sources: agentPerformance.sources,
+    agents: agents.sort((a, b) => b.calls_this_period - a.calls_this_period || a.full_name.localeCompare(b.full_name)),
+  };
+
+  return agentPerformance;
+};
+
 // =============================
-// Controller: Monthly Reports
+// Controllers
 // =============================
 
 /**
- * GET /api/v1/reports/monthly?year=2026&month=3
+ * GET /api/v1/reports/agents
  *
- * Returns a single JSON payload for the Reports page, covering ONE month:
- *  - Call Statistics card (total + per-agent breakdown)
- *  - Calls by Source card
- *  - Sales from Calls card
- *  - Monthly Performance table
- *
- * Role scoping:
- *  - admin     -> all sales reps
- *  - manager   -> sales reps in teams they manage (and within those teams)
- *  - sales_rep -> self only
+ * Returns the list of sales reps the logged-in user is allowed to report on.
  */
-const getMonthlyReports = async (req, res) => {
+const getReportAgents = async (req, res) => {
   try {
     const { id: userId, role } = req.user;
 
-    // 1) Month range (2025–2035; defaults to current month)
-    let range;
+    let scope;
     try {
-      range = parseMonthRange(req);
+      scope = await resolveScope({ userId, role });
+    } catch (err) {
+      return resError(res, err.message, 403);
+    }
+
+    const accessibleAgents = await getAccessibleAgents({
+      scopeType: scope.scopeType,
+      scopedUserIds: scope.scopedUserIds,
+      userId,
+    });
+
+    return resSuccess(res, {
+      scope: {
+        type: scope.scopeType,
+        user_id: userId,
+      },
+      agents: accessibleAgents.map((agent) => ({
+        id: agent.id,
+        full_name: agent.full_name,
+        email: agent.email,
+      })),
+    });
+  } catch (err) {
+    console.error("getReportAgents Error:", err);
+    return resError(res, "Failed to load report agents.", 500);
+  }
+};
+
+/**
+ * GET /api/v1/reports
+ *
+ * Supported filters:
+ *  - monthly:
+ *      ?report_type=monthly&year=2026&month=3&agent_id=all
+ *  - daily:
+ *      ?report_type=daily&date=2026-04-02&agent_id=12
+ *  - custom range:
+ *      ?report_type=custom_range&from_date=2026-04-01&to_date=2026-04-15&agent_id=all
+ */
+const getReports = async (req, res) => {
+  try {
+    const { id: userId, role } = req.user;
+
+    let period;
+    try {
+      period = parseReportPeriod(req);
     } catch (err) {
       return resError(res, err.message, 400);
     }
-    const { year, month, start, end } = range;
 
-    // 2) Determine role-based scope for "agents"
-    //    - admin   -> all sales reps (no further restriction)
-    //    - manager -> sales reps in teams they manage
-    //    - sales_rep -> self
-    let scopeType = "all";
-    let scopedUserIds = null; // used for role scoping of notes & sales
-
-    if (role === "admin") {
-      scopeType = "all";
-      scopedUserIds = null;
-    } else if (role === "manager") {
-      scopeType = "team";
-      scopedUserIds = await resolveManagerAssignees(userId); // manager + members
-    } else if (role === "sales_rep") {
-      scopeType = "self";
-      scopedUserIds = [userId];
-    } else {
-      return resError(res, "Forbidden for this role", 403);
+    let scope;
+    try {
+      scope = await resolveScope({ userId, role });
+    } catch (err) {
+      return resError(res, err.message, 403);
     }
 
-    // 3) Load master lists: statuses & sources (for sales + performance table)
+    const { scopeType, scopedUserIds } = scope;
+    const { start, end } = period;
+
     const allStatuses = await LeadStatus.findAll({
       attributes: ["id", "value", "label"],
       order: [["id", "ASC"]],
@@ -146,409 +747,114 @@ const getMonthlyReports = async (req, res) => {
       order: [["id", "ASC"]],
     });
 
-    // Find customer status (for sales)
-    const customerStatus = allStatuses.find((s) => {
-      const v = (s.value || "").toLowerCase();
-      const l = (s.label || "").toLowerCase();
-      return v === "customer" || l === "customer";
+    const customerStatus = allStatuses.find((status) => {
+      const value = String(status.value || "").toLowerCase();
+      const label = String(status.label || "").toLowerCase();
+      return value === "customer" || label === "customer";
     });
 
-    // 4) Find "agents" (sales reps) in scope
-    const agentWhere = { is_active: true };
-    if (scopeType === "self") {
-      agentWhere.id = userId;
-    } else if (scopeType === "team" && Array.isArray(scopedUserIds) && scopedUserIds.length) {
-      agentWhere.id = { [Op.in]: scopedUserIds };
-    }
-
-    const agentUsers = await User.findAll({
-      where: agentWhere,
-      include: [
-        {
-          model: Role,
-          attributes: [],
-          where: { value: "sales_rep" },
-        },
-      ],
-      attributes: ["id", "full_name", "email"],
-      order: [["full_name", "ASC"]],
+    const accessibleAgents = await getAccessibleAgents({
+      scopeType,
+      scopedUserIds,
+      userId,
     });
 
-    const agentIds = agentUsers.map((u) => u.id);
-
-    // Common WHERE for LeadNote-based queries (calls for this month)
-    const notesWhere = {
-      created_at: {
-        [Op.gte]: start,
-        [Op.lte]: end,
-      },
-    };
-
-    if (agentIds.length) {
-      notesWhere.author_id = { [Op.in]: agentIds };
-    } else if (scopeType !== "all") {
-      // No agents but scoped role -> force zero rows
-      notesWhere.author_id = { [Op.in]: [-1] };
+    let selectedAgentIds;
+    try {
+      selectedAgentIds = resolveSelectedAgentIds({
+        req,
+        accessibleAgents,
+        role,
+        userId,
+      });
+    } catch (err) {
+      return resError(res, err.message, 400);
     }
 
-    // =========================
-    // 6) Call Statistics card
-    // =========================
-    let callStatistics = {
-      totalCalls: 0,
-      byAgent: [],
-    };
+    const filteredAgentUsers = accessibleAgents.filter((agent) => selectedAgentIds.includes(agent.id));
+    const notesWhere = buildNotesWhere({
+      start,
+      end,
+      agentIds: selectedAgentIds,
+      scopeType,
+    });
 
-    let callCountsMap = new Map();
+    const { callStatistics, callCountsMap } = await buildCallStatistics({
+      agentUsers: filteredAgentUsers,
+      notesWhere,
+    });
 
-    if (agentIds.length) {
-      const callStatsRows = await LeadNote.findAll({
-        where: notesWhere,
-        attributes: ["author_id", [fn("COUNT", col("LeadNote.id")), "call_count"]],
-        group: ["author_id"],
-        raw: true,
-      });
+    const callsBySource = await buildCallsBySource({
+      agentUsers: filteredAgentUsers,
+      notesWhere,
+      start,
+      end,
+    });
 
-      callCountsMap = new Map(callStatsRows.map((r) => [Number(r.author_id), Number(r.call_count || 0)]));
+    const { salesFromCalls, conversionsMap } = await buildSalesFromCalls({
+      customerStatus,
+      start,
+      end,
+      notesWhere,
+      scopeType,
+      scopedUserIds,
+      userId,
+      selectedAgentIds,
+    });
 
-      const byAgent = agentUsers.map((user) => {
-        const callCount = callCountsMap.get(user.id) || 0;
-        return {
-          user_id: user.id,
-          full_name: user.full_name,
-          email: user.email,
-          call_count: callCount,
-        };
-      });
+    const agentPerformance = await buildAgentPerformance({
+      agentUsers: filteredAgentUsers,
+      allStatuses,
+      allSources,
+      start,
+      end,
+      callCountsMap,
+      conversionsMap,
+    });
 
-      const totalCalls = byAgent.reduce((sum, a) => sum + a.call_count, 0);
-
-      callStatistics = {
-        totalCalls,
-        byAgent: byAgent.sort((a, b) => b.call_count - a.call_count || a.full_name.localeCompare(b.full_name)),
-      };
-    }
-
-    // =========================
-    // 7) Calls by Source card
-    // =========================
-    //
-    // Now additionally constrained by the lead's *last contacted* date
-    // (Lead.updated_at) being in [start, end].
-    let callsBySource = [];
-
-    if (agentIds.length) {
-      const callsBySourceRows = await LeadNote.findAll({
-        where: notesWhere,
-        attributes: [
-          [col("Lead.source_id"), "source_id"],
-          [fn("COUNT", col("LeadNote.id")), "call_count"],
-        ],
-        include: [
-          {
-            model: Lead,
-            attributes: [],
-            where: {
-              updated_at: {
-                [Op.gte]: start,
-                [Op.lte]: end,
-              },
-            },
-            include: [
-              {
-                model: LeadSource,
-                attributes: ["id", "label", "value"],
-              },
-            ],
-          },
-        ],
-        group: ["Lead.source_id", "Lead->LeadSource.id", "Lead->LeadSource.label", "Lead->LeadSource.value"],
-        raw: true,
-      });
-
-      callsBySource = callsBySourceRows.map((r) => ({
-        source_id: r.source_id,
-        label: r["Lead.LeadSource.label"] || null,
-        value: r["Lead.LeadSource.value"] || null,
-        call_count: Number(r.call_count || 0),
-      }));
-    }
-
-    // =========================
-    // 8) Sales from Calls card
-    // =========================
-    //
-    // Now requires BOTH:
-    //  - Lead.status = CUSTOMER AND Lead.updated_at in [start, end] (i.e., last contacted this month)
-    //  - Lead has at least one LeadNote (call) this month by an in-scope agent.
-    let salesFromCalls = {
-      totalCustomers: 0,
-      bySource: [],
-    };
-
-    const conversionsMap = new Map(); // user_id -> conversions_this_month
-
-    // Precompute: which leads had calls this month (for "from calls" requirement)
-    let leadIdsWithCallsThisMonth = new Set();
-    if (agentIds.length) {
-      const leadsWithCallsRows = await LeadNote.findAll({
-        where: notesWhere,
-        attributes: [[fn("DISTINCT", col("lead_id")), "lead_id"]],
-        raw: true,
-      });
-
-      leadIdsWithCallsThisMonth = new Set(
-        leadsWithCallsRows.map((r) => Number(r.lead_id)).filter((id) => !Number.isNaN(id)),
-      );
-    }
-
-    if (customerStatus) {
-      const salesWhere = {
-        status_id: customerStatus.id,
-        updated_at: {
-          [Op.gte]: start,
-          [Op.lte]: end,
-        },
-      };
-
-      const assignmentWhere = {
-        id: { [Op.in]: LATEST_ASSIGNMENT_IDS },
-      };
-
-      if (scopeType === "team" && scopedUserIds && scopedUserIds.length) {
-        assignmentWhere.assignee_id = { [Op.in]: scopedUserIds };
-      } else if (scopeType === "self") {
-        assignmentWhere.assignee_id = userId;
-      }
-
-      const customerLeadsRaw = await Lead.findAll({
-        where: salesWhere,
-        attributes: ["id", "source_id"],
-        include: [
-          {
-            model: LeadSource,
-            attributes: ["id", "label", "value"],
-          },
-          {
-            model: LeadAssignment,
-            as: "LeadAssignments",
-            attributes: ["assignee_id"],
-            required: true,
-            where: assignmentWhere,
-          },
-        ],
-      });
-
-      // Filter to only those leads that had at least one call (LeadNote) this month
-      const customerLeads = customerLeadsRaw.filter((lead) => leadIdsWithCallsThisMonth.has(lead.id));
-
-      const totalCustomers = customerLeads.length;
-
-      // Group customers by source
-      const bySourceMap = new Map();
-      for (const lead of customerLeads) {
-        const id = lead.source_id || 0;
-        const key = String(id);
-        const current = bySourceMap.get(key) || {
-          source_id: id,
-          label: lead.LeadSource ? lead.LeadSource.label : null,
-          value: lead.LeadSource ? lead.LeadSource.value : null,
-          count: 0,
-        };
-        current.count += 1;
-        bySourceMap.set(key, current);
-
-        // Attribute conversions to latest assignee (agent)
-        const latestAssignment = Array.isArray(lead.LeadAssignments) ? lead.LeadAssignments[0] : null;
-        const assigneeId = latestAssignment ? Number(latestAssignment.assignee_id) : null;
-
-        if (assigneeId && agentIds.includes(assigneeId)) {
-          const prev = conversionsMap.get(assigneeId) || 0;
-          conversionsMap.set(assigneeId, prev + 1);
-        }
-      }
-
-      const customersBySource = Array.from(bySourceMap.values()).sort((a, b) => b.count - a.count);
-
-      salesFromCalls = {
-        totalCustomers,
-        bySource: customersBySource,
-      };
-    }
-
-    // =========================
-    // 9) Monthly Performance table
-    // =========================
-    //
-    // Month-based:
-    //  - status_counts: only leads whose LATEST assignment's assigned_at
-    //    falls within [start, end].
-    //  - source_counts: same, but grouped by Lead.source_id.
-    //  - callsThisMonth: from LeadNote (already month-filtered above).
-    //  - conversionsThisMonth: from salesFromCalls (already month-filtered).
-    let monthlyPerformance = {
-      statuses: allStatuses.map((s) => ({
-        id: s.id,
-        value: s.value,
-        label: s.label,
-      })),
-      sources: allSources.map((src) => ({
-        id: src.id,
-        value: src.value,
-        label: src.label,
-      })),
-      agents: [],
-    };
-
-    if (agentIds.length) {
-      // 9.1 Status breakdown by agent (ONLY assignments in this month)
-      const statusRows = await LeadAssignment.findAll({
-        attributes: [
-          "assignee_id",
-          [col("Lead.status_id"), "status_id"],
-          [fn("COUNT", col("LeadAssignment.lead_id")), "lead_count"],
-        ],
-        where: {
-          id: { [Op.in]: LATEST_ASSIGNMENT_IDS },
-          assignee_id: { [Op.in]: agentIds },
-          assigned_at: {
-            [Op.gte]: start,
-            [Op.lte]: end,
-          },
-        },
-        include: [
-          {
-            model: Lead,
-            attributes: [],
-          },
-        ],
-        group: ["assignee_id", "Lead.status_id"],
-        raw: true,
-      });
-
-      const statusCountsByAgent = new Map(); // agentId -> Map(statusId -> count)
-      for (const row of statusRows) {
-        const aid = String(row.assignee_id);
-        const sid = String(row.status_id || 0);
-        const count = Number(row.lead_count || 0);
-
-        if (!statusCountsByAgent.has(aid)) {
-          statusCountsByAgent.set(aid, new Map());
-        }
-        const inner = statusCountsByAgent.get(aid);
-        inner.set(sid, (inner.get(sid) || 0) + count);
-      }
-
-      // 9.2 Source breakdown by agent (ONLY assignments in this month)
-      const sourceRows = await LeadAssignment.findAll({
-        attributes: [
-          "assignee_id",
-          [col("Lead.source_id"), "source_id"],
-          [fn("COUNT", col("LeadAssignment.lead_id")), "lead_count"],
-        ],
-        where: {
-          id: { [Op.in]: LATEST_ASSIGNMENT_IDS },
-          assignee_id: { [Op.in]: agentIds },
-          assigned_at: {
-            [Op.gte]: start,
-            [Op.lte]: end,
-          },
-        },
-        include: [
-          {
-            model: Lead,
-            attributes: [],
-          },
-        ],
-        group: ["assignee_id", "Lead.source_id"],
-        raw: true,
-      });
-
-      const sourceCountsByAgent = new Map(); // agentId -> Map(sourceId -> count)
-      for (const row of sourceRows) {
-        const aid = String(row.assignee_id);
-        const sid = String(row.source_id || 0);
-        const count = Number(row.lead_count || 0);
-
-        if (!sourceCountsByAgent.has(aid)) {
-          sourceCountsByAgent.set(aid, new Map());
-        }
-        const inner = sourceCountsByAgent.get(aid);
-        inner.set(sid, (inner.get(sid) || 0) + count);
-      }
-
-      // 9.3 Build final per-agent rows
-      const agentsPerf = agentUsers.map((user) => {
-        const aid = user.id;
-
-        const statusMap = statusCountsByAgent.get(String(aid)) || new Map();
-        const sourceMap = sourceCountsByAgent.get(String(aid)) || new Map();
-
-        const statusCounts = allStatuses.map((s) => ({
-          status_id: s.id,
-          status_value: s.value,
-          status_label: s.label,
-          count: statusMap.get(String(s.id)) || 0,
-        }));
-
-        const sourceCounts = allSources.map((src) => ({
-          source_id: src.id,
-          source_value: src.value,
-          source_label: src.label,
-          count: sourceMap.get(String(src.id)) || 0,
-        }));
-
-        const callsThisMonth = callCountsMap.get(aid) || 0;
-        const conversionsThisMonth = conversionsMap.get(aid) || 0;
-        const conversionRate = callsThisMonth > 0 ? conversionsThisMonth / callsThisMonth : 0;
-
-        return {
-          user_id: aid,
-          full_name: user.full_name,
-          email: user.email,
-          calls_this_month: callsThisMonth,
-          conversion_rate: conversionRate,
-          status_counts: statusCounts,
-          source_counts: sourceCounts,
-        };
-      });
-
-      monthlyPerformance = {
-        statuses: monthlyPerformance.statuses,
-        sources: monthlyPerformance.sources,
-        agents: agentsPerf.sort(
-          (a, b) => b.calls_this_month - a.calls_this_month || a.full_name.localeCompare(b.full_name),
-        ),
-      };
-    }
-
-    // =========================
-    // 10) Final payload
-    // =========================
     return resSuccess(res, {
       period: {
-        year,
-        month,
+        report_type: period.report_type,
+        year: period.year,
+        month: period.month,
+        date: period.date,
+        from_date: period.from_date,
+        to_date: period.to_date,
         start,
         end,
+        label: period.label,
       },
       scope: {
-        type: scopeType, // "all" | "team" | "self"
+        type: scopeType,
         user_id: userId,
+      },
+      filters: {
+        selected_agent_id: selectedAgentIds.length === 1 ? selectedAgentIds[0] : "all",
+        available_agents: accessibleAgents.map((agent) => ({
+          id: agent.id,
+          full_name: agent.full_name,
+          email: agent.email,
+        })),
       },
       cards: {
         callStatistics,
         callsBySource,
         salesFromCalls,
-        monthlyPerformance,
+        agentPerformance,
+        monthlyPerformance: agentPerformance, // kept for backward compatibility
       },
     });
   } catch (err) {
-    console.error("getMonthlyReports Error:", err);
-    return resError(res, "Failed to build monthly reports.", 500);
+    console.error("getReports Error:", err);
+    return resError(res, "Failed to build reports.", 500);
   }
 };
 
+// Backward-compatible alias if your route still uses getMonthlyReports
+const getMonthlyReports = getReports;
+
 module.exports = {
+  getReports,
   getMonthlyReports,
+  getReportAgents,
 };
