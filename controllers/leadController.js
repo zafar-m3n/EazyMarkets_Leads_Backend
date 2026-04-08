@@ -336,7 +336,8 @@ const updateLead = async (req, res) => {
       }
     }
 
-    const { first_name, last_name, company, email, phone, country, status_id, source_id, notes } = req.body;
+    const { first_name, last_name, company, email, phone, country, status_id, source_id, notes, note_datetime } =
+      req.body;
 
     if (first_name !== undefined) lead.first_name = first_name;
     if (last_name !== undefined) lead.last_name = last_name;
@@ -347,18 +348,37 @@ const updateLead = async (req, res) => {
     if (status_id !== undefined) lead.status_id = status_id;
     if (source_id !== undefined) lead.source_id = source_id;
 
+    let parsedNoteDateTime = null;
+
+    if (note_datetime !== undefined && note_datetime !== null && String(note_datetime).trim() !== "") {
+      parsedNoteDateTime = new Date(note_datetime);
+
+      if (isNaN(parsedNoteDateTime.getTime())) {
+        await t.rollback();
+        return resError(res, "Invalid note date/time", 400);
+      }
+
+      if (parsedNoteDateTime.getTime() > Date.now()) {
+        await t.rollback();
+        return resError(res, "Note date/time cannot be in the future", 400);
+      }
+    }
+
     lead.updated_by = req.user.id;
     await lead.save({ transaction: t });
 
     if (typeof notes === "string" && notes.trim().length > 0) {
-      const note = await LeadNote.create(
-        {
-          lead_id: lead.id,
-          author_id: req.user.id,
-          body: notes.trim(),
-        },
-        { transaction: t },
-      );
+      const notePayload = {
+        lead_id: lead.id,
+        author_id: req.user.id,
+        body: notes.trim(),
+      };
+
+      if (parsedNoteDateTime) {
+        notePayload.created_at = parsedNoteDateTime;
+      }
+
+      const note = await LeadNote.create(notePayload, { transaction: t });
 
       await lead.update({ updated_at: note.created_at }, { transaction: t });
     }
@@ -436,6 +456,46 @@ const getLeadAssignments = async (req, res) => {
   }
 };
 
+const updateLeadNote = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { leadId, noteId } = req.params;
+    const { body } = req.body;
+
+    if (typeof body !== "string" || body.trim().length === 0) {
+      await t.rollback();
+      return resError(res, "Note body is required", 400);
+    }
+
+    const note = await LeadNote.findOne({
+      where: { id: noteId, lead_id: leadId },
+      transaction: t,
+    });
+
+    if (!note) {
+      await t.rollback();
+      return resError(res, "Note not found", 404);
+    }
+
+    note.body = body.trim();
+    await note.save({ transaction: t });
+
+    const lead = await Lead.findByPk(leadId, { transaction: t });
+    if (lead) {
+      await lead.update({ updated_at: new Date() }, { transaction: t });
+    }
+
+    await t.commit();
+    return resSuccess(res, note);
+  } catch (err) {
+    console.error("UpdateLeadNote Error:", err);
+    try {
+      await t.rollback();
+    } catch (_) {}
+    return resError(res, "Internal server error", 500);
+  }
+};
+
 const deleteLeadNote = async (req, res) => {
   try {
     const { leadId, noteId } = req.params;
@@ -469,5 +529,6 @@ module.exports = {
   deleteLead,
   assignLead,
   getLeadAssignments,
+  updateLeadNote,
   deleteLeadNote,
 };

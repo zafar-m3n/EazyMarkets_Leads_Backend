@@ -10,6 +10,7 @@ const {
   deleteLead,
   assignLead,
   getLeadAssignments,
+  updateLeadNote,
   deleteLeadNote,
 } = require("../controllers/leadController");
 
@@ -27,6 +28,7 @@ router.use(authMiddleware);
 router.get("/", roleMiddleware(["admin", "manager", "sales_rep"]), getLeads);
 router.get("/:id", roleMiddleware(["admin", "manager", "sales_rep"]), getLeadById);
 router.get("/:id/assignments", roleMiddleware(["admin", "manager", "sales_rep"]), getLeadAssignments);
+router.put("/:leadId/notes/:noteId", roleMiddleware(["admin", "manager", "sales_rep"]), updateLeadNote);
 
 /**
  * =============================
