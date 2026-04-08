@@ -5,6 +5,8 @@ const { resSuccess, resError } = require("../utils/responseUtil");
 
 const LATEST_ASSIGNMENT_IDS = literal(`(SELECT MAX(id) FROM lead_assignments GROUP BY lead_id)`);
 
+const normalizePhoneDigits = (p) => (p ? String(p) : "").replace(/\D+/g, "").slice(0, 32);
+
 const buildLatestAssignmentInclude = (
   assigneeIds = [],
   assignedFrom = null,
@@ -46,6 +48,37 @@ const createLead = async (req, res) => {
     if (!status_id) {
       await t.rollback();
       return resError(res, "status_id is required", 400);
+    }
+
+    const emailNormalized = email ? String(email).toLowerCase() : null;
+    const phoneNorm = phone ? normalizePhoneDigits(phone) : null;
+
+    const whereClauses = [];
+
+    if (emailNormalized) {
+      whereClauses.push({ email: emailNormalized });
+    }
+
+    if (phoneNorm) {
+      const normalizedDbPhone = sequelize.fn("REGEXP_REPLACE", sequelize.col("phone"), "[^0-9]", "");
+
+      whereClauses.push(sequelize.where(normalizedDbPhone, phoneNorm));
+    }
+
+    let existingLead = null;
+
+    if (whereClauses.length > 0) {
+      existingLead = await Lead.findOne({
+        where: {
+          [Op.or]: whereClauses,
+        },
+        transaction: t,
+      });
+    }
+
+    if (existingLead) {
+      await t.rollback();
+      return resError(res, "Lead with same email or phone already exists", 409);
     }
 
     const lead = await Lead.create(
