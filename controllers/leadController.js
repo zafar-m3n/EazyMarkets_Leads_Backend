@@ -50,8 +50,8 @@ const createLead = async (req, res) => {
       return resError(res, "status_id is required", 400);
     }
 
-    const emailNormalized = email ? String(email).toLowerCase() : null;
-    const phoneNorm = phone ? normalizePhoneDigits(phone) : null;
+    const emailNormalized = email && String(email).trim() !== "" ? String(email).trim().toLowerCase() : null;
+    const phoneNorm = phone && String(phone).trim() !== "" ? normalizePhoneDigits(String(phone).trim()) : null;
 
     const whereClauses = [];
 
