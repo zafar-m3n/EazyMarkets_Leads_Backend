@@ -1,9 +1,11 @@
-const { Op } = require("sequelize");
-const { Lead, LeadStatus, LeadSource } = require("../models");
+const { Op, literal } = require("sequelize");
+const { Lead, LeadStatus, LeadSource, LeadAssignment, User } = require("../models");
 const { resSuccess, resError } = require("../utils/responseUtil");
 
+const LATEST_ASSIGNMENT_IDS = literal(`(SELECT MAX(id) FROM lead_assignments GROUP BY lead_id)`);
+
 function buildExportQueryParts(req) {
-  const { status_ids, source_ids } =
+  const { status_ids, source_ids, assignee_ids } =
     req.body?.filters && typeof req.body.filters === "object" ? req.body.filters : req.body || {};
 
   const where = {};
@@ -24,9 +26,31 @@ function buildExportQueryParts(req) {
     if (ids.length) where.source_id = { [Op.in]: ids };
   }
 
+  const parsedAssigneeIds = assignee_ids
+    ? String(assignee_ids)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map(Number)
+        .filter(Boolean)
+    : [];
+
+  const assignmentWhere = { id: { [Op.in]: LATEST_ASSIGNMENT_IDS } };
+
+  if (parsedAssigneeIds.length > 0) {
+    assignmentWhere.assignee_id = { [Op.in]: parsedAssigneeIds };
+  }
+
   const include = [
     { model: LeadStatus, attributes: ["id", "value", "label"] },
     { model: LeadSource, attributes: ["id", "value", "label"] },
+    {
+      model: LeadAssignment,
+      as: "LeadAssignments",
+      required: parsedAssigneeIds.length > 0,
+      where: assignmentWhere,
+      include: [{ model: User, as: "assignee", attributes: ["id", "full_name"] }],
+    },
   ];
 
   return { where, include };
@@ -46,7 +70,8 @@ function csvEscape(value) {
 
 function writeCsvHeader(res) {
   const header =
-    ["first_name", "last_name", "company", "email", "phone", "country", "status", "source"].join(CSV_DELIM) + CRLF;
+    ["first_name", "last_name", "company", "email", "phone", "country", "status", "source", "agent"].join(CSV_DELIM) +
+    CRLF;
 
   res.write("\uFEFF" + header);
 }
@@ -61,6 +86,7 @@ function leadToCsvRow(l) {
     csvEscape(l.country || ""),
     csvEscape(l?.LeadStatus?.label || ""),
     csvEscape(l?.LeadSource?.label || ""),
+    csvEscape(l?.LeadAssignments?.[0]?.assignee?.full_name || ""),
   ];
   return cells.join(CSV_DELIM) + CRLF;
 }
